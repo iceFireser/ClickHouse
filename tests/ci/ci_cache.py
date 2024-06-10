@@ -5,7 +5,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, Optional, Any, Union, Sequence, List, Set
 
-from ci_config import JobNames, Build, CI_CONFIG, JobConfig
+from ci_config import CI
+
 from ci_utils import is_hex, GHActions
 from commit_status_helper import CommitStatusData
 from env_helper import (
@@ -41,7 +42,7 @@ class CiCache:
         release - for jobs being executed on the release branch including master branch (not a PR branch)
     """
 
-    _REQUIRED_DIGESTS = [JobNames.DOCS_CHECK, Build.PACKAGE_RELEASE]
+    _REQUIRED_DIGESTS = [CI.JobNames.DOCS_CHECK, CI.BuildNames.PACKAGE_RELEASE]
     _S3_CACHE_PREFIX = "CI_cache_v1"
     _CACHE_BUILD_REPORT_PREFIX = "build_report"
     _RECORD_FILE_EXTENSION = ".ci"
@@ -80,7 +81,7 @@ class CiCache:
 
         @classmethod
         def is_docs_job(cls, job_name: str) -> bool:
-            return job_name == JobNames.DOCS_CHECK
+            return job_name == CI.JobNames.DOCS_CHECK
 
         @classmethod
         def is_srcs_job(cls, job_name: str) -> bool:
@@ -127,7 +128,10 @@ class CiCache:
 
     @classmethod
     def calc_digests_and_create(
-        cls, s3: S3Helper, job_configs: Dict[str, JobConfig], cache_enabled: bool = True
+        cls,
+        s3: S3Helper,
+        job_configs: Dict[str, CI.JobConfig],
+        cache_enabled: bool = True,
     ) -> "CiCache":
         job_digester = JobDigester()
         digests = {}
@@ -140,9 +144,7 @@ class CiCache:
 
         for job in cls._REQUIRED_DIGESTS:
             if job not in job_configs:
-                digest = job_digester.get_job_digest(
-                    CI_CONFIG.get_job_config(job).digest
-                )
+                digest = job_digester.get_job_digest(CI.get_job_config(job).digest)
                 digests[job] = digest
                 print(
                     f"    job [{job.rjust(50)}] required for CI Cache has digest [{digest}]"
@@ -154,10 +156,10 @@ class CiCache:
         self, job_digests: Dict[str, str], job_type: JobType
     ) -> str:
         if job_type == self.JobType.DOCS:
-            res = job_digests[JobNames.DOCS_CHECK]
+            res = job_digests[CI.JobNames.DOCS_CHECK]
         elif job_type == self.JobType.SRCS:
-            if Build.PACKAGE_RELEASE in job_digests:
-                res = job_digests[Build.PACKAGE_RELEASE]
+            if CI.BuildNames.PACKAGE_RELEASE in job_digests:
+                res = job_digests[CI.BuildNames.PACKAGE_RELEASE]
             else:
                 assert False, "BUG, no build job in digest' list"
         else:
@@ -648,7 +650,7 @@ class CiCache:
         report_path = Path(REPORT_PATH)
         report_path.mkdir(exist_ok=True, parents=True)
         path = (
-            self._get_record_s3_path(Build.PACKAGE_RELEASE)
+            self._get_record_s3_path(CI.BuildNames.PACKAGE_RELEASE)
             + self._CACHE_BUILD_REPORT_PREFIX
         )
         if file_prefix:
@@ -664,7 +666,8 @@ class CiCache:
     def upload_build_report(self, build_result: BuildResult) -> str:
         result_json_path = build_result.write_json(Path(TEMP_PATH))
         s3_path = (
-            self._get_record_s3_path(Build.PACKAGE_RELEASE) + result_json_path.name
+            self._get_record_s3_path(CI.BuildNames.PACKAGE_RELEASE)
+            + result_json_path.name
         )
         return self.s3.upload_file(
             bucket=S3_BUILDS_BUCKET, file_path=result_json_path, s3_path=s3_path
@@ -692,7 +695,7 @@ class CiCache:
             MAX_ROUNDS_TO_WAIT = 1
             remove_from_wait = []
             for job in self.jobs_to_wait:
-                if job not in Build:
+                if job not in CI.BuildNames:
                     remove_from_wait.append(job)
             for job in remove_from_wait:
                 del self.jobs_to_wait[job]
@@ -717,7 +720,7 @@ class CiCache:
                 self.update()
                 for job_name, job_config in self.jobs_to_wait.items():
                     num_batches = job_config.num_batches
-                    job_config = CI_CONFIG.get_job_config(job_name)
+                    job_config = CI.get_job_config(job_name)
                     assert job_config.pending_batches
                     assert job_config.batches
                     pending_batches = list(job_config.pending_batches)
@@ -765,7 +768,9 @@ class CiCache:
             [list(self.jobs_to_wait)],
         )
 
-    def apply(self, job_configs: Dict[str, JobConfig], is_release: bool) -> "CiCache":
+    def apply(
+        self, job_configs: Dict[str, CI.JobConfig], is_release: bool
+    ) -> "CiCache":
         if not self.enabled:
             self.jobs_to_do = job_configs
             return self

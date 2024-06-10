@@ -152,7 +152,7 @@ def main():
     run_cpp_check = True
     run_shell_check = True
     run_python_check = True
-    if CI and pr_info.number > 0:
+    if IS_CI and pr_info.number > 0:
         pr_info.fetch_changed_files()
         run_cpp_check = any(
             not (is_python(file) or is_shell(file)) for file in pr_info.changed_files

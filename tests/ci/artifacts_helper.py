@@ -131,7 +131,7 @@ class ArtifactsHelper:
         post_commit_status(commit, SUCCESS, url, "Artifacts for workflow", "Artifacts")
 
     def _regenerate_index(self) -> None:
-        if CI:
+        if IS_CI:
             files = self._get_s3_objects()
         else:
             files = self._get_local_s3_objects()

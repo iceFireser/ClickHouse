@@ -10,7 +10,7 @@ from typing import Any, Callable, List, Optional, Union
 
 import requests
 
-from ci_config import CI_CONFIG
+from ci_config import CI
 
 try:
     # A work around for scripts using this downloading module without required deps
@@ -120,10 +120,6 @@ def get_gh_api(
     raise APIException("Unable to request data from GH API") from exc
 
 
-def get_build_name_for_check(check_name: str) -> str:
-    return CI_CONFIG.test_configs[check_name].required_build
-
-
 def read_build_urls(build_name: str, reports_path: Union[Path, str]) -> List[str]:
     for root, _, files in os.walk(reports_path):
         for file in files:
@@ -208,7 +204,7 @@ def download_builds_filter(
     result_path: Path,
     filter_fn: Callable[[str], bool] = lambda _: True,
 ) -> None:
-    build_name = get_build_name_for_check(check_name)
+    build_name = CI.get_required_build_name(check_name)
     urls = read_build_urls(build_name, reports_path)
     logging.info("The build report for %s contains the next URLs: %s", build_name, urls)
 
@@ -245,7 +241,7 @@ def download_clickhouse_binary(
 def get_clickhouse_binary_url(
     check_name: str, reports_path: Union[Path, str]
 ) -> Optional[str]:
-    build_name = get_build_name_for_check(check_name)
+    build_name = CI.get_required_build_name(check_name)
     urls = read_build_urls(build_name, reports_path)
     logging.info("The build report for %s contains the next URLs: %s", build_name, urls)
     for url in urls:

@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Union
 from sys import modules
 
 from docker_images_helper import get_images_info
-from ci_config import DigestConfig
 from git_helper import Runner
 from env_helper import ROOT_DIR
 from ci_utils import cd
+from ci_config import CI
 
 DOCKER_DIGEST_LEN = 12
 JOB_DIGEST_LEN = 10
@@ -144,14 +144,14 @@ class JobDigester:
         self.cache: Dict[str, str] = {}
 
     @staticmethod
-    def _get_config_hash(digest_config: DigestConfig) -> str:
+    def _get_config_hash(digest_config: CI.DigestConfig) -> str:
         data_dict = asdict(digest_config)
         hash_obj = md5()
         hash_obj.update(str(data_dict).encode())
         hash_string = hash_obj.hexdigest()
         return hash_string
 
-    def get_job_digest(self, digest_config: DigestConfig) -> str:
+    def get_job_digest(self, digest_config: CI.DigestConfig) -> str:
         if not digest_config.include_paths:
             # job is not for digest
             return "f" * JOB_DIGEST_LEN
