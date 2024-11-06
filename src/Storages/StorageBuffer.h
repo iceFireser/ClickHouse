@@ -10,9 +10,18 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
+#include <Disks/StoragePolicy.h>
 
-namespace Poco { class Logger; }
+#include <Storages/BufferSettings.h>
+#include <Storages/BufferWriteAheadLog.h>
+#include <Common/SimpleIncrement.h>
+
+namespace Poco
+{
+class Logger;
+}
 
 
 namespace DB
@@ -41,7 +50,7 @@ namespace DB
   * When you destroy a Buffer table, all remaining data is flushed to the subordinate table.
   * The data in the buffer is not replicated, not logged to disk, not indexed. With a rough restart of the server, the data is lost.
   */
-class StorageBuffer final : public IStorage, WithContext
+class StorageBuffer final : public IStorage, public WithContext
 {
 friend class BufferSource;
 friend class BufferSink;
@@ -68,9 +77,14 @@ public:
         const Thresholds & max_thresholds_,
         const Thresholds & flush_thresholds_,
         const StorageID & destination_id,
-        bool allow_materialized_);
+        bool allow_materialized_,
+        const String & relative_data_path_,
+        StoragePolicyPtr storage_policy_,
+        const BufferSettings & buffer_settings_);
 
     std::string getName() const override { return "Buffer"; }
+
+    bool storesDataOnDisk() const override { return true; }
 
     QueryProcessingStage::Enum
     getQueryProcessingStage(ContextPtr, QueryProcessingStage::Enum, const StorageSnapshotPtr &, SelectQueryInfo &) const override;
@@ -89,9 +103,8 @@ public:
 
     bool supportsSubcolumns() const override { return true; }
 
-    bool supportsDynamicSubcolumns() const override { return true; }
-
-    SinkToStoragePtr write(const ASTPtr & query, const StorageMetadataPtr & /*metadata_snapshot*/, ContextPtr context, bool /*async_insert*/) override;
+    SinkToStoragePtr
+    write(const ASTPtr & query, const StorageMetadataPtr & /*metadata_snapshot*/, ContextPtr context, bool /*async_insert*/) override;
 
     void startup() override;
     /// Flush all buffers into the subordinate table and stop background thread.
@@ -121,12 +134,56 @@ public:
     std::optional<UInt64> lifetimeRows() const override { return lifetime_writes.rows; }
     std::optional<UInt64> lifetimeBytes() const override { return lifetime_writes.bytes; }
 
+    String getLogName() const { return log->name(); }
+
+    String getRelativeDataPath() const { return relative_data_path; }
+
+    void drop() override;
+
+    const BufferSettings & getBufferSettingsRef() const { return buffer_settings; }
+
+    void truncate(
+        const ASTPtr & /*query*/,
+        const StorageMetadataPtr & /* metadata_snapshot */,
+        ContextPtr /* context */,
+        TableExclusiveLockHolder &) override;
 
 private:
+    using WriteAheadLogPtr = std::shared_ptr<BufferWriteAheadLog>;
+    using WriteAheadLogDiskMap = std::map<String, DiskPtr>;
+    using BufferBytesMap = std::map<size_t, String, std::greater<>>;
+    using BufferPartitionSet = std::set<String>;
+
+    struct BlockAndOffsetWithPartition
+    {
+        Block block;
+        Row partition;
+        /// for row's offset
+        std::vector<size_t> offsets;
+        /// for wal data part metadata
+        std::vector<size_t> wal_pos;
+
+        BlockAndOffsetWithPartition(Block && block_, Row && partition_) : block(block_), partition(std::move(partition_)) { }
+
+        void appendBlockAndOffset(const LoggerPtr & log_, BlockAndOffsetWithPartition & block_and_offset);
+        void appendOffset(const LoggerPtr & log_, BlockAndOffsetWithPartition & block_and_offset);
+        void removeBlockAndOffset(const LoggerPtr & log_, BlockAndOffsetWithPartition & block_and_offset);
+        void checkBLockAndOffset(const LoggerPtr & log_) const;
+    };
+
+    /// key is partition_id
+    using BufferBlockAndOffsetWithPartitionMap = std::map<String, BlockAndOffsetWithPartition>;
+    using BufferBlocksAndOffsetWithPartition = std::vector<BlockAndOffsetWithPartition>;
+
     struct Buffer
     {
         time_t first_write_time = 0;
-        Block data;
+        /// Block data;
+        BufferBlockAndOffsetWithPartitionMap data_map;
+        /// for low bytes partition block flush round robin
+        Int64 history_minor_partition_index = -1;
+
+        WriteAheadLogPtr write_ahead_log;
 
         /// Schema version, checked to avoid mixing blocks with different sets of columns, from
         /// before and after an ALTER. There are some remaining mild problems if an ALTER happens
@@ -140,9 +197,18 @@ private:
         ///    usually don't produce lots of small blocks.
         int32_t metadata_version = 0;
 
+        /// For wal data part numbers.
+        SimpleIncrement increment;
+
+        bool has_flushed_once = false;
+
         std::unique_lock<std::mutex> lockForReading() const;
         std::unique_lock<std::mutex> lockForWriting() const;
         std::unique_lock<std::mutex> tryLock() const;
+
+        size_t bufferRows() const;
+        size_t bufferBytes() const;
+        size_t bufferAllocatedBytes() const;
 
     private:
         mutable std::mutex mutex;
@@ -161,6 +227,12 @@ private:
 
     StorageID destination_id;
     bool allow_materialized;
+    /// Relative path data, changes during rename for ordinary databases use
+    /// under lockForShare if rename is possible.
+    String relative_data_path;
+    const StoragePolicyPtr storage_policy;
+
+    BufferSettings buffer_settings;
 
     struct Writes
     {
@@ -173,20 +245,63 @@ private:
     LoggerPtr log;
 
     void flushAllBuffers(bool check_thresholds = true);
-    bool flushBuffer(Buffer & buffer, bool check_thresholds, bool locked = false);
-    bool checkThresholds(const Buffer & buffer, bool direct, time_t current_time, size_t additional_rows = 0, size_t additional_bytes = 0) const;
+    bool flushSomeBuffer(Buffer & buffer);
+    bool flushAllBuffer(Buffer & buffer);
+    bool
+    checkThresholds(const Buffer & buffer, time_t current_time) const;
     bool checkThresholdsImpl(bool direct, size_t rows, size_t bytes, time_t time_passed) const;
 
     /// `table` argument is passed, as it is sometimes evaluated beforehand. It must match the `destination`.
-    void writeBlockToDestination(const Block & block, StoragePtr table);
+    void writeBlockToDestination(const Block & block, StoragePtr table) const;
 
     void backgroundFlush();
     void reschedule();
+    void schedule();
 
     StoragePtr getDestinationTable() const;
 
     BackgroundSchedulePool & bg_pool;
     BackgroundSchedulePoolTaskHolder flush_handle;
+
+
+    void initializeDirectoriesAndFormatVersion(const std::string & relative_data_path_, bool attach, bool need_create_directories);
+
+    void load_buffer_wal();
+
+    WriteAheadLogPtr getWriteAheadLog(size_t index, const WriteAheadLogDiskMap & wal_map);
+
+    void clearBuffer();
+
+    BufferBlocksAndOffsetWithPartition splitBlockIntoParts(Block && block, Buffer & buffer, const StoragePtr & destination);
+
+    void buildScatterSelector(
+        const ColumnRawPtrs & columns,
+        PODArray<size_t> & partition_num_to_first_row,
+        IColumn::Selector & selector,
+        size_t max_parts,
+        ContextPtr context_) const;
+
+    bool enableWriteAheadLog() const;
+
+    static size_t caculate_flush_partition_count(double max_avg_ratio, double max_total_ratio,
+        double max_total_threshold, size_t max_partition_count);
+
+    bool enumeratePartitionBuffer(Buffer & buffer, time_t time_passed, BufferBlockAndOffsetWithPartitionMap & map) const;
+
+    void writeDropPartLog(Buffer & buffer, BufferBlockAndOffsetWithPartitionMap & map) const;
+
+    bool rebuildPartLog(Buffer & buffer, bool force_rebuild) const;
+
+    void removeFlushDataInBuffer(Buffer & buffer, BufferBlockAndOffsetWithPartitionMap & map);
+
+    std::condition_variable flush_condition;
+    std::mutex flush_condition_lock;
+    size_t wait_number;
+
+    bool waitForFlush(Int64 milliseconds);
+    void notifyAllWaitForFlush();
+
+    String getPartitionIdFromRow(const Row & partition_row, const StoragePtr & destination) const;
 };
 
 }

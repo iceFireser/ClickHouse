@@ -963,6 +963,11 @@ class IColumn;
     \
     /** Experimental feature for moving data between shards. */ \
     M(Bool, allow_experimental_query_deduplication, false, "Experimental data deduplication for SELECT queries based on part UUIDs", 0) \
+    M(UInt64, append_to_buffer_max_try_count, 6, "Number of attempts to append data to the buffer in StorageBuffer. (0 means always try, not recommended)", 0) \
+    M(Milliseconds, append_to_buffer_try_interval_ms, 5000, "Interval in milliseconds between each attempt to append data to the StorageBuffer", 0) \
+    M(Bool, allow_split_buffer_block_with_destination_partition, true, "Allow StorageBuffer to store cached data partitioned by the target table.", 0) \
+    M(Double, min_memory_ratio_for_max_partition_to_total, 0.2, "The minimum ratio of the maximum partition in StorageBuffer to the total memory. If it is less than this ratio, the number of partitions flushed to the target table will be automatically increased. 0 means turning off this option.", 0) \
+    M(UInt64, max_partitions_to_destination, 0, "Maximum partitions in the StorageBuffer to flush to the destination, 0 means no limit.", 0) \
 
     /** End of experimental features */
 
